@@ -1,0 +1,559 @@
+diff -urN src/bazarr-1.5.0/custom_libs/deathbycaptcha.py src/bazarr-1.5.0/custom_libs/deathbycaptcha.py
+--- src/bazarr-1.5.0/custom_libs/deathbycaptcha.py	2024-12-24 13:32:56.527346476 -0600
++++ src/bazarr-1.5.0/custom_libs/deathbycaptcha.py	2024-12-24 13:06:54.775984701 -0600
+@@ -71,7 +71,7 @@
+ import base64
+ import binascii
+ import errno
+-import imghdr
++from imghdr import what
+ import random
+ import os
+ import select
+diff -urN src/bazarr-1.5.0/custom_libs/imghdr.py src/bazarr-1.5.0/custom_libs/imghdr.py
+--- src/bazarr-1.5.0/custom_libs/imghdr.py	1969-12-31 18:00:00.000000000 -0600
++++ src/bazarr-1.5.0/custom_libs/imghdr.py	2024-12-24 13:06:54.775984701 -0600
+@@ -0,0 +1,16 @@
++# Replace imghdr.what with a custom implementation using magic
++import magic
++
++def what(_, img):
++    """
++    Mimics imghdr.what functionality using python-magic.
++    """
++    mime = magic.Magic(mime=True)
++    img_type = mime.from_buffer(img)
++    if img_type.startswith("image/jpeg"):
++        return 'jpeg'
++    elif img_type.startswith("image/png"):
++        return 'png'
++    elif img_type.startswith("image/gif"):
++        return 'gif'
++    return None
+diff -urN src/bazarr-1.5.0/custom_libs/libfilebot/main.py src/bazarr-1.5.0/custom_libs/libfilebot/main.py
+--- src/bazarr-1.5.0/custom_libs/libfilebot/main.py	2024-12-24 13:33:04.944292627 -0600
++++ src/bazarr-1.5.0/custom_libs/libfilebot/main.py	2024-12-24 13:06:54.779318141 -0600
+@@ -11,7 +11,7 @@
+ import types
+ import os
+ 
+-from pipes import quote
++from shlex import quote
+ from .lib import find_executable
+ 
+ mswindows = False
+diff -urN src/bazarr-1.5.0/libs/sqlalchemy/util/_collections.py src/bazarr-1.5.0/libs/sqlalchemy/util/_collections.py
+--- src/bazarr-1.5.0/libs/sqlalchemy/util/_collections.py	2024-12-24 13:32:48.467078818 -0600
++++ src/bazarr-1.5.0/libs/sqlalchemy/util/_collections.py	2024-12-24 13:06:54.772651261 -0600
+@@ -16,6 +16,7 @@
+ from typing import Any
+ from typing import Callable
+ from typing import cast
++from typing import Container
+ from typing import Dict
+ from typing import FrozenSet
+ from typing import Generic
+@@ -425,15 +426,14 @@
+         return list(x)
+ 
+ 
+-def has_intersection(set_, iterable):
++def has_intersection(set_: Container[Any], iterable: Iterable[Any]) -> bool:
+     r"""return True if any items of set\_ are present in iterable.
+ 
+     Goes through special effort to ensure __hash__ is not called
+     on items in iterable that don't support it.
+ 
+     """
+-    # TODO: optimize, write in C, etc.
+-    return bool(set_.intersection([i for i in iterable if i.__hash__]))
++    return any(i in set_ for i in iterable if i.__hash__)
+ 
+ 
+ def to_set(x):
+diff -urN src/bazarr-1.5.0/libs/sqlalchemy/util/compat.py src/bazarr-1.5.0/libs/sqlalchemy/util/compat.py
+--- src/bazarr-1.5.0/libs/sqlalchemy/util/compat.py	2024-12-24 13:32:48.467078818 -0600
++++ src/bazarr-1.5.0/libs/sqlalchemy/util/compat.py	2024-12-24 13:06:54.772651261 -0600
+@@ -32,6 +32,7 @@
+ from typing import TypeVar
+ 
+ 
++py313 = sys.version_info >= (3, 13)
+ py312 = sys.version_info >= (3, 12)
+ py311 = sys.version_info >= (3, 11)
+ py310 = sys.version_info >= (3, 10)
+@@ -58,7 +59,7 @@
+     varkw: Optional[str]
+     defaults: Optional[Tuple[Any, ...]]
+     kwonlyargs: List[str]
+-    kwonlydefaults: Dict[str, Any]
++    kwonlydefaults: Optional[Dict[str, Any]]
+     annotations: Dict[str, Any]
+ 
+ 
+diff -urN src/bazarr-1.5.0/libs/sqlalchemy/util/concurrency.py src/bazarr-1.5.0/libs/sqlalchemy/util/concurrency.py
+--- src/bazarr-1.5.0/libs/sqlalchemy/util/concurrency.py	2024-12-24 13:32:48.467078818 -0600
++++ src/bazarr-1.5.0/libs/sqlalchemy/util/concurrency.py	2024-12-24 13:06:54.772651261 -0600
+@@ -10,11 +10,15 @@
+ 
+ import asyncio  # noqa
+ import typing
++from typing import Any
++from typing import Callable
++from typing import Coroutine
++from typing import TypeVar
+ 
+ have_greenlet = False
+ greenlet_error = None
+ try:
+-    import greenlet  # type: ignore # noqa: F401
++    import greenlet  # type: ignore[import-untyped,unused-ignore]  # noqa: F401,E501
+ except ImportError as e:
+     greenlet_error = str(e)
+     pass
+@@ -26,12 +30,43 @@
+     from ._concurrency_py3k import greenlet_spawn as greenlet_spawn
+     from ._concurrency_py3k import is_exit_exception as is_exit_exception
+     from ._concurrency_py3k import AsyncAdaptedLock as AsyncAdaptedLock
+-    from ._concurrency_py3k import (
+-        _util_async_run as _util_async_run,
+-    )  # noqa: F401
+-    from ._concurrency_py3k import (
+-        _util_async_run_coroutine_function as _util_async_run_coroutine_function,  # noqa: F401, E501
+-    )
++    from ._concurrency_py3k import _Runner
++
++_T = TypeVar("_T")
++
++
++class _AsyncUtil:
++    """Asyncio util for test suite/ util only"""
++
++    def __init__(self) -> None:
++        if have_greenlet:
++            self.runner = _Runner()
++
++    def run(
++        self,
++        fn: Callable[..., Coroutine[Any, Any, _T]],
++        *args: Any,
++        **kwargs: Any,
++    ) -> _T:
++        """Run coroutine on the loop"""
++        return self.runner.run(fn(*args, **kwargs))
++
++    def run_in_greenlet(
++        self, fn: Callable[..., _T], *args: Any, **kwargs: Any
++    ) -> _T:
++        """Run sync function in greenlet. Support nested calls"""
++        if have_greenlet:
++            if self.runner.get_loop().is_running():
++                return fn(*args, **kwargs)
++            else:
++                return self.runner.run(greenlet_spawn(fn, *args, **kwargs))
++        else:
++            return fn(*args, **kwargs)
++
++    def close(self) -> None:
++        if have_greenlet:
++            self.runner.close()
++
+ 
+ if not typing.TYPE_CHECKING and not have_greenlet:
+ 
+diff -urN src/bazarr-1.5.0/libs/sqlalchemy/util/_concurrency_py3k.py src/bazarr-1.5.0/libs/sqlalchemy/util/_concurrency_py3k.py
+--- src/bazarr-1.5.0/libs/sqlalchemy/util/_concurrency_py3k.py	2024-12-24 13:32:48.467078818 -0600
++++ src/bazarr-1.5.0/libs/sqlalchemy/util/_concurrency_py3k.py	2024-12-24 13:06:54.772651261 -0600
+@@ -19,10 +19,14 @@
+ from typing import Optional
+ from typing import TYPE_CHECKING
+ from typing import TypeVar
++from typing import Union
+ 
+ from .langhelpers import memoized_property
+ from .. import exc
++from ..util import py311
++from ..util.typing import Literal
+ from ..util.typing import Protocol
++from ..util.typing import Self
+ from ..util.typing import TypeGuard
+ 
+ _T = TypeVar("_T")
+@@ -70,9 +74,10 @@
+ class _AsyncIoGreenlet(greenlet):
+     dead: bool
+ 
++    __sqlalchemy_greenlet_provider__ = True
++
+     def __init__(self, fn: Callable[..., Any], driver: greenlet):
+         greenlet.__init__(self, fn, driver)
+-        self.driver = driver
+         if _has_gr_context:
+             self.gr_context = driver.gr_context
+ 
+@@ -98,7 +103,7 @@
+ 
+ def in_greenlet() -> bool:
+     current = getcurrent()
+-    return isinstance(current, _AsyncIoGreenlet)
++    return getattr(current, "__sqlalchemy_greenlet_provider__", False)
+ 
+ 
+ def await_only(awaitable: Awaitable[_T]) -> _T:
+@@ -112,7 +117,7 @@
+     """
+     # this is called in the context greenlet while running fn
+     current = getcurrent()
+-    if not isinstance(current, _AsyncIoGreenlet):
++    if not getattr(current, "__sqlalchemy_greenlet_provider__", False):
+         _safe_cancel_awaitable(awaitable)
+ 
+         raise exc.MissingGreenlet(
+@@ -124,7 +129,7 @@
+     # a coroutine to run. Once the awaitable is done, the driver greenlet
+     # switches back to this greenlet with the result of awaitable that is
+     # then returned to the caller (or raised as error)
+-    return current.driver.switch(awaitable)  # type: ignore[no-any-return]
++    return current.parent.switch(awaitable)  # type: ignore[no-any-return,attr-defined] # noqa: E501
+ 
+ 
+ def await_fallback(awaitable: Awaitable[_T]) -> _T:
+@@ -144,7 +149,7 @@
+ 
+     # this is called in the context greenlet while running fn
+     current = getcurrent()
+-    if not isinstance(current, _AsyncIoGreenlet):
++    if not getattr(current, "__sqlalchemy_greenlet_provider__", False):
+         loop = get_event_loop()
+         if loop.is_running():
+             _safe_cancel_awaitable(awaitable)
+@@ -156,7 +161,7 @@
+             )
+         return loop.run_until_complete(awaitable)
+ 
+-    return current.driver.switch(awaitable)  # type: ignore[no-any-return]
++    return current.parent.switch(awaitable)  # type: ignore[no-any-return,attr-defined] # noqa: E501
+ 
+ 
+ async def greenlet_spawn(
+@@ -182,24 +187,21 @@
+     # coroutine to wait. If the context is dead the function has
+     # returned, and its result can be returned.
+     switch_occurred = False
+-    try:
+-        result = context.switch(*args, **kwargs)
+-        while not context.dead:
+-            switch_occurred = True
+-            try:
+-                # wait for a coroutine from await_only and then return its
+-                # result back to it.
+-                value = await result
+-            except BaseException:
+-                # this allows an exception to be raised within
+-                # the moderated greenlet so that it can continue
+-                # its expected flow.
+-                result = context.throw(*sys.exc_info())
+-            else:
+-                result = context.switch(value)
+-    finally:
+-        # clean up to avoid cycle resolution by gc
+-        del context.driver
++    result = context.switch(*args, **kwargs)
++    while not context.dead:
++        switch_occurred = True
++        try:
++            # wait for a coroutine from await_only and then return its
++            # result back to it.
++            value = await result
++        except BaseException:
++            # this allows an exception to be raised within
++            # the moderated greenlet so that it can continue
++            # its expected flow.
++            result = context.throw(*sys.exc_info())
++        else:
++            result = context.switch(value)
++
+     if _require_await and not switch_occurred:
+         raise exc.AwaitRequired(
+             "The current operation required an async execution but none was "
+@@ -225,34 +227,6 @@
+         self.mutex.release()
+ 
+ 
+-def _util_async_run_coroutine_function(
+-    fn: Callable[..., Coroutine[Any, Any, Any]], *args: Any, **kwargs: Any
+-) -> Any:
+-    """for test suite/ util only"""
+-
+-    loop = get_event_loop()
+-    if loop.is_running():
+-        raise Exception(
+-            "for async run coroutine we expect that no greenlet or event "
+-            "loop is running when we start out"
+-        )
+-    return loop.run_until_complete(fn(*args, **kwargs))
+-
+-
+-def _util_async_run(
+-    fn: Callable[..., Coroutine[Any, Any, Any]], *args: Any, **kwargs: Any
+-) -> Any:
+-    """for test suite/ util only"""
+-
+-    loop = get_event_loop()
+-    if not loop.is_running():
+-        return loop.run_until_complete(greenlet_spawn(fn, *args, **kwargs))
+-    else:
+-        # allow for a wrapped test function to call another
+-        assert isinstance(getcurrent(), _AsyncIoGreenlet)
+-        return fn(*args, **kwargs)
+-
+-
+ def get_event_loop() -> asyncio.AbstractEventLoop:
+     """vendor asyncio.get_event_loop() for python 3.7 and above.
+ 
+@@ -265,3 +239,50 @@
+         # avoid "During handling of the above exception, another exception..."
+         pass
+     return asyncio.get_event_loop_policy().get_event_loop()
++
++
++if not TYPE_CHECKING and py311:
++    _Runner = asyncio.Runner
++else:
++
++    class _Runner:
++        """Runner implementation for test only"""
++
++        _loop: Union[None, asyncio.AbstractEventLoop, Literal[False]]
++
++        def __init__(self) -> None:
++            self._loop = None
++
++        def __enter__(self) -> Self:
++            self._lazy_init()
++            return self
++
++        def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
++            self.close()
++
++        def close(self) -> None:
++            if self._loop:
++                try:
++                    self._loop.run_until_complete(
++                        self._loop.shutdown_asyncgens()
++                    )
++                finally:
++                    self._loop.close()
++                    self._loop = False
++
++        def get_loop(self) -> asyncio.AbstractEventLoop:
++            """Return embedded event loop."""
++            self._lazy_init()
++            assert self._loop
++            return self._loop
++
++        def run(self, coro: Coroutine[Any, Any, _T]) -> _T:
++            self._lazy_init()
++            assert self._loop
++            return self._loop.run_until_complete(coro)
++
++        def _lazy_init(self) -> None:
++            if self._loop is False:
++                raise RuntimeError("Runner is closed")
++            if self._loop is None:
++                self._loop = asyncio.new_event_loop()
+diff -urN src/bazarr-1.5.0/libs/sqlalchemy/util/__init__.py src/bazarr-1.5.0/libs/sqlalchemy/util/__init__.py
+--- src/bazarr-1.5.0/libs/sqlalchemy/util/__init__.py	2024-12-24 13:32:48.467078818 -0600
++++ src/bazarr-1.5.0/libs/sqlalchemy/util/__init__.py	2024-12-24 13:06:54.772651261 -0600
+@@ -65,6 +65,7 @@
+ from .compat import py310 as py310
+ from .compat import py311 as py311
+ from .compat import py312 as py312
++from .compat import py313 as py313
+ from .compat import py38 as py38
+ from .compat import py39 as py39
+ from .compat import pypy as pypy
+diff -urN src/bazarr-1.5.0/libs/sqlalchemy/util/langhelpers.py src/bazarr-1.5.0/libs/sqlalchemy/util/langhelpers.py
+--- src/bazarr-1.5.0/libs/sqlalchemy/util/langhelpers.py	2024-12-24 13:32:48.467078818 -0600
++++ src/bazarr-1.5.0/libs/sqlalchemy/util/langhelpers.py	2024-12-24 13:06:54.772651261 -0600
+@@ -174,10 +174,11 @@
+             return "unprintable element %r" % element
+ 
+ 
+-def clsname_as_plain_name(cls: Type[Any]) -> str:
+-    return " ".join(
+-        n.lower() for n in re.findall(r"([A-Z][a-z]+|SQL)", cls.__name__)
+-    )
++def clsname_as_plain_name(
++    cls: Type[Any], use_name: Optional[str] = None
++) -> str:
++    name = use_name or cls.__name__
++    return " ".join(n.lower() for n in re.findall(r"([A-Z][a-z]+|SQL)", name))
+ 
+ 
+ def method_is_overridden(
+@@ -307,10 +308,10 @@
+         )
+         decorated.__defaults__ = getattr(fn, "__func__", fn).__defaults__
+ 
+-        decorated.__wrapped__ = fn  # type: ignore
+-        return cast(_Fn, update_wrapper(decorated, fn))
++        decorated.__wrapped__ = fn  # type: ignore[attr-defined]
++        return update_wrapper(decorated, fn)  # type: ignore[return-value]
+ 
+-    return update_wrapper(decorate, target)
++    return update_wrapper(decorate, target)  # type: ignore[return-value]
+ 
+ 
+ def _update_argspec_defaults_into_env(spec, env):
+@@ -1658,6 +1659,8 @@
+         items: List[symbol]
+         cls._items = items = []
+         for k, v in dict_.items():
++            if re.match(r"^__.*__$", k):
++                continue
+             if isinstance(v, int):
+                 sym = symbol(k, canonical=v)
+             elif not k.startswith("_"):
+@@ -1957,6 +1960,9 @@
+     return env["set"]
+ 
+ 
++_dunders = re.compile("^__.+__$")
++
++
+ class TypingOnly:
+     """A mixin class that marks a class as 'typing only', meaning it has
+     absolutely no methods, attributes, or runtime functionality whatsoever.
+@@ -1967,15 +1973,9 @@
+ 
+     def __init_subclass__(cls) -> None:
+         if TypingOnly in cls.__bases__:
+-            remaining = set(cls.__dict__).difference(
+-                {
+-                    "__module__",
+-                    "__doc__",
+-                    "__slots__",
+-                    "__orig_bases__",
+-                    "__annotations__",
+-                }
+-            )
++            remaining = {
++                name for name in cls.__dict__ if not _dunders.match(name)
++            }
+             if remaining:
+                 raise AssertionError(
+                     f"Class {cls} directly inherits TypingOnly but has "
+@@ -2208,3 +2208,11 @@
+         )
+     else:
+         return False
++
++
++class _Missing(enum.Enum):
++    Missing = enum.auto()
++
++
++Missing = _Missing.Missing
++MissingOr = Union[_T, Literal[_Missing.Missing]]
+Binary files src/bazarr-1.5.0/libs/sqlalchemy/util/__pycache__/_collections.cpython-313.pyc and src/bazarr-1.5.0/libs/sqlalchemy/util/__pycache__/_collections.cpython-313.pyc differ
+Binary files src/bazarr-1.5.0/libs/sqlalchemy/util/__pycache__/compat.cpython-313.pyc and src/bazarr-1.5.0/libs/sqlalchemy/util/__pycache__/compat.cpython-313.pyc differ
+Binary files src/bazarr-1.5.0/libs/sqlalchemy/util/__pycache__/concurrency.cpython-313.pyc and src/bazarr-1.5.0/libs/sqlalchemy/util/__pycache__/concurrency.cpython-313.pyc differ
+Binary files src/bazarr-1.5.0/libs/sqlalchemy/util/__pycache__/_concurrency_py3k.cpython-313.pyc and src/bazarr-1.5.0/libs/sqlalchemy/util/__pycache__/_concurrency_py3k.cpython-313.pyc differ
+Binary files src/bazarr-1.5.0/libs/sqlalchemy/util/__pycache__/deprecations.cpython-313.pyc and src/bazarr-1.5.0/libs/sqlalchemy/util/__pycache__/deprecations.cpython-313.pyc differ
+Binary files src/bazarr-1.5.0/libs/sqlalchemy/util/__pycache__/_has_cy.cpython-313.pyc and src/bazarr-1.5.0/libs/sqlalchemy/util/__pycache__/_has_cy.cpython-313.pyc differ
+Binary files src/bazarr-1.5.0/libs/sqlalchemy/util/__pycache__/__init__.cpython-313.pyc and src/bazarr-1.5.0/libs/sqlalchemy/util/__pycache__/__init__.cpython-313.pyc differ
+Binary files src/bazarr-1.5.0/libs/sqlalchemy/util/__pycache__/langhelpers.cpython-313.pyc and src/bazarr-1.5.0/libs/sqlalchemy/util/__pycache__/langhelpers.cpython-313.pyc differ
+Binary files src/bazarr-1.5.0/libs/sqlalchemy/util/__pycache__/preloaded.cpython-313.pyc and src/bazarr-1.5.0/libs/sqlalchemy/util/__pycache__/preloaded.cpython-313.pyc differ
+Binary files src/bazarr-1.5.0/libs/sqlalchemy/util/__pycache__/_py_collections.cpython-313.pyc and src/bazarr-1.5.0/libs/sqlalchemy/util/__pycache__/_py_collections.cpython-313.pyc differ
+Binary files src/bazarr-1.5.0/libs/sqlalchemy/util/__pycache__/queue.cpython-313.pyc and src/bazarr-1.5.0/libs/sqlalchemy/util/__pycache__/queue.cpython-313.pyc differ
+Binary files src/bazarr-1.5.0/libs/sqlalchemy/util/__pycache__/tool_support.cpython-313.pyc and src/bazarr-1.5.0/libs/sqlalchemy/util/__pycache__/tool_support.cpython-313.pyc differ
+Binary files src/bazarr-1.5.0/libs/sqlalchemy/util/__pycache__/topological.cpython-313.pyc and src/bazarr-1.5.0/libs/sqlalchemy/util/__pycache__/topological.cpython-313.pyc differ
+Binary files src/bazarr-1.5.0/libs/sqlalchemy/util/__pycache__/typing.cpython-313.pyc and src/bazarr-1.5.0/libs/sqlalchemy/util/__pycache__/typing.cpython-313.pyc differ
+diff -urN src/bazarr-1.5.0/libs/sqlalchemy/util/typing.py src/bazarr-1.5.0/libs/sqlalchemy/util/typing.py
+--- src/bazarr-1.5.0/libs/sqlalchemy/util/typing.py	2024-12-24 13:32:48.470412263 -0600
++++ src/bazarr-1.5.0/libs/sqlalchemy/util/typing.py	2024-12-24 13:06:54.772651261 -0600
+@@ -62,6 +62,13 @@
+ _VT = TypeVar("_VT")
+ _VT_co = TypeVar("_VT_co", covariant=True)
+ 
++if compat.py38:
++    # typing_extensions.Literal is different from typing.Literal until
++    # Python 3.10.1
++    _LITERAL_TYPES = frozenset([typing.Literal, Literal])
++else:
++    _LITERAL_TYPES = frozenset([Literal])
++
+ 
+ if compat.py310:
+     # why they took until py310 to put this in stdlib is beyond me,
+@@ -188,9 +195,51 @@
+         )
+ 
+         return _copy_generic_annotation_with(annotation, elements)
++
+     return annotation  # type: ignore
+ 
+ 
++def fixup_container_fwd_refs(
++    type_: _AnnotationScanType,
++) -> _AnnotationScanType:
++    """Correct dict['x', 'y'] into dict[ForwardRef('x'), ForwardRef('y')]
++    and similar for list, set
++
++    """
++
++    if (
++        is_generic(type_)
++        and typing_get_origin(type_)
++        in (
++            dict,
++            set,
++            list,
++            collections_abc.MutableSet,
++            collections_abc.MutableMapping,
++            collections_abc.MutableSequence,
++            collections_abc.Mapping,
++            collections_abc.Sequence,
++        )
++        # fight, kick and scream to struggle to tell the difference between
++        # dict[] and typing.Dict[] which DO NOT compare the same and DO NOT
++        # behave the same yet there is NO WAY to distinguish between which type
++        # it is using public attributes
++        and not re.match(
++            "typing.(?:Dict|List|Set|.*Mapping|.*Sequence|.*Set)", repr(type_)
++        )
++    ):
++        # compat with py3.10 and earlier
++        return typing_get_origin(type_).__class_getitem__(  # type: ignore
++            tuple(
++                [
++                    ForwardRef(elem) if isinstance(elem, str) else elem
++                    for elem in typing_get_args(type_)
++                ]
++            )
++        )
++    return type_
++
++
+ def _copy_generic_annotation_with(
+     annotation: GenericProtocol[_T], elements: Tuple[_AnnotationScanType, ...]
+ ) -> Type[_T]:
+@@ -314,7 +363,7 @@
+ 
+ 
+ def is_literal(type_: _AnnotationScanType) -> bool:
+-    return get_origin(type_) is Literal
++    return get_origin(type_) in _LITERAL_TYPES
+ 
+ 
+ def is_newtype(type_: Optional[_AnnotationScanType]) -> TypeGuard[NewType]:
+@@ -337,7 +386,7 @@
+     super_type = type_.__supertype__
+     while is_newtype(super_type):
+         super_type = super_type.__supertype__
+-    return super_type
++    return super_type  # type: ignore[return-value]
+ 
+ 
+ def is_fwd_ref(
